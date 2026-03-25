@@ -1,152 +1,96 @@
 #!/bin/bash
 
-now=`date +%d%b%Y-%H%M`
+# Configuration
+USER_NAME="devops"
+GROUP_NAME="devops"
+USER_PASS="today@1234"
+BACKUP_DIR="/home/backup"
+TIMESTAMP=$(date +%d%b%Y-%H%M)
 
-exp()
-{
-	"$1" <(cat <<-EOF
-	spawn passwd $USER
-	expect "Enter new UNIX password:"
-	send -- "$passw\r"
-	expect "Retype new UNIX password:"
-	send -- "$passw\r"
-	expect eof
-	EOF
-	)
-	echo "password for USER $USER updated successfully - adding to sudoers file now"
-}
-
-setup_pass()
-{
-
-if [ $1 == "sles" ];then
-  
-   if [ ! -f /usr/bin/expect ] && [ ! -f /bin/expect ];then
-#        zypper -y update
-        zypper install -y expect
-        exp "/usr/bin/expect"
-   else
-        exp "/usr/bin/expect"
-   fi
-
-elif [ $1 == "ubuntu" ];then
-   
-   if [ ! -f /usr/bin/expect ] && [ ! -f /bin/expect ];then
-        apt-get update
-        apt install -y expect
-        exp "/usr/bin/expect"
-   else
-        exp "/usr/bin/expect"
-   fi
-
-elif [ $1 == "amzn" ];then
-
-   echo $1
-   if [ ! -f /usr/bin/expect ] && [ ! -f /bin/expect ];then
-        rpm -Uvh http://epel.mirror.net.in/epel/6/x86_64/epel-release-6-8.noarch.rpm
-        yum install -y expect
-        exp "/usr/bin/expect"
-   else
-        exp "/usr/bin/expect"
-   fi
-
-elif [ $1 == "centos" ];then
-
-   echo $1
-   if [ ! -f /usr/bin/expect ] && [ ! -f /bin/expect ];then
-        rpm -Uvh http://epel.mirror.net.in/epel/6/x86_64/epel-release-6-8.noarch.rpm
-        yum install -y expect
-        exp "/bin/expect"
-   else
-        exp "/bin/expect"
-   fi
+# 1. OS Detection
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS_NAME=$ID # e.g., ubuntu, centos, amzn, sles
 else
-   echo "could not find case $1"
+    echo "Error: Cannot detect OS. /etc/os-release missing."
+    exit 1
 fi
 
+echo "Running setup for OS: $OS_NAME"
+
+# 2. User & Group Setup
+setup_user() {
+    # Create group if it doesn't exist
+    if ! getent group "$GROUP_NAME" >/dev/null; then
+        groupadd "$GROUP_NAME"
+    fi
+
+    # Create user if it doesn't exist
+    if ! id -u "$USER_NAME" >/dev/null 2>&1; then
+        echo "Creating user: $USER_NAME"
+        useradd -m -d "/home/$USER_NAME" -s /bin/bash -g "$GROUP_NAME" "$USER_NAME"
+    else
+        echo "User $USER_NAME already exists. Updating password only."
+    fi
+
+    # Set password securely without 'expect'
+    echo "$USER_NAME:$USER_PASS" | chpasswd
+    echo "Password updated for $USER_NAME."
 }
 
-update_conf()
-{
-   sudofile="/etc/sudoers"
-   sshdfile="/etc/ssh/sshd_config"
-   sshdconfd="/etc/ssh/sshd_config.d"
-   mkdir -p /home/backup
-   if [ -f $sudofile ];then
-        cp -p $sudofile /home/backup/sudoers-$now
-        sa=`grep $USER $sudofile | wc -l`
-        if [ $sa -gt 0 ];then
-             echo "$USER user already present in $sudofile - no changes required"
-             grep $USER $sudofile
-        else
-#             echo "$USER ALL=(ALL) ALL" >> $sudofile
-             echo "$USER ALL=(ALL) NOPASSWD: ALL" >> $sudofile
-             echo "updated the sudoers file successfully"
-        fi
-   else
-        echo "could not find $sudofile"
-   fi
-   if [ -d $sshdconfd ];then
-       if [ -f $sshdconfd/60-cloudimg-settings.conf ];then
-            sed -i '/PasswordAuthentication.*no/d' $sshdconfd/60-cloudimg-settings.conf
-            sed -i '/PasswordAuthentication.*yes/d' $sshdconfd/60-cloudimg-settings.conf
-            echo "PasswordAuthentication yes" >> $sshdconfd/60-cloudimg-settings.conf
-       else
-          echo "$sshdconfd/60-cloudimg-settings.conf does not exist"  
-       fi
-   else
-      echo "$sshdconfd does not exist... continue with $sshdfile"
-   fi          
-   if [ -f $sshdfile ];then
-        cp -p $sshdfile /home/backup/sshd_config-$now
-        sed -i '/ClientAliveInterval.*0/d' $sshdfile
-        echo "ClientAliveInterval 240" >> $sshdfile
-        sed -i '/PasswordAuthentication.*no/d' $sshdfile
-        sed -i '/PasswordAuthentication.*yes/d' $sshdfile
-        echo "PasswordAuthentication yes" >> $sshdfile
-        #sed -i '/PermitRootLogin.*yes/d' $sshdfile
-        #sed -i '/PermitRootLogin.*prohibit-password/d' $sshdfile
-        #echo "PermitRootLogin yes" >> $sshdfile
-        echo "updated $sshdfile Successfully -- restarting sshd service"
-        service sshd restart
-   else
-        echo "could not find $sshdfile"
-   fi
+# 3. Permissions (Sudoers)
+update_sudoers() {
+    mkdir -p "$BACKUP_DIR"
+    [ -f /etc/sudoers ] && cp -p /etc/sudoers "$BACKUP_DIR/sudoers-$TIMESTAMP"
+
+    # Best practice: use a drop-in file in sudoers.d
+    echo "$USER_NAME ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$USER_NAME"
+    chmod 440 "/etc/sudoers.d/$USER_NAME"
+    echo "Sudoers permissions granted."
 }
 
-############### MAIN ###################
+# 4. SSH Configuration
+update_ssh() {
+    SSHD_CONFIG="/etc/ssh/sshd_config"
+    mkdir -p "$BACKUP_DIR"
+    cp -p "$SSHD_CONFIG" "$BACKUP_DIR/sshd_config-$TIMESTAMP"
 
-USER="devops"
-GROUP="devops"
-passw="today@1234"
+    # Update SSH settings
+    sed -i '/^PasswordAuthentication/d' "$SSHD_CONFIG"
+    sed -i '/^ClientAliveInterval/d' "$SSHD_CONFIG"
+    echo "PasswordAuthentication yes" >> "$SSHD_CONFIG"
+    echo "ClientAliveInterval 240" >> "$SSHD_CONFIG"
 
-if id -u "$USER" &>/dev/null; then 
-   echo "devops user exists no action required.."
-   exit 0
-else
-  echo "devops user missing, continue to create it.."
-fi
+    # Fix for Cloud-Init overrides
+    CLOUD_SSH="/etc/ssh/sshd_config.d/60-cloudimg-settings.conf"
+    if [ -f "$CLOUD_SSH" ]; then
+        sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' "$CLOUD_SSH"
+    fi
 
-if [ -f /etc/os-release ];then
-   osname=`grep ID /etc/os-release | egrep -v 'VERSION|LIKE|VARIANT|PLATFORM' | cut -d'=' -f2 | sed -e 's/"//' -e 's/"//'`
-   echo $osname
-else
-   echo "can not locate /etc/os-release - unable find the osname"
-   exit 8
-fi
+    # Smarter Restart: Tries 'ssh' (Ubuntu/Debian) then 'sshd' (RHEL/CentOS/SLES)
+    echo "Restarting SSH service..."
+    if systemctl list-unit-files | grep -q "^ssh.service"; then
+        systemctl restart ssh
+    elif systemctl list-unit-files | grep -q "^sshd.service"; then
+        systemctl restart sshd
+    else
+        service ssh restart || service sshd restart
+    fi
+    
+    echo "SSH configuration updated and service restarted successfully."
+}
 
-case "$osname" in
-  sles|amzn|ubuntu|centos)
-     userdel -r $USER 
-     groupdel $GROUP
-     sleep 3
-     groupadd $GROUP
-     useradd $USER -m -d /home/$USER -s /bin/bash -g $GROUP
-     setup_pass $osname
-     update_conf
-    ;;
-  *)
-    echo "could not determine the correct osname -- found $osname"
-    ;;
+
+# --- Execution ---
+case "$OS_NAME" in
+    ubuntu|debian|centos|rhel|amzn|sles)
+        setup_user
+        update_sudoers
+        update_ssh
+        echo "Setup complete!"
+        ;;
+    *)
+        echo "Unsupported OS: $OS_NAME"
+        exit 1
+        ;;
 esac
-exit 0
